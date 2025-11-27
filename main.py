@@ -16,6 +16,7 @@ def ignitis_scraper() -> List[Dict[str, Optional[str]]]:
         - salary: Salary range
         - url: Link to the job posting
         - company_tag: Company/division tag (e.g., 'eso', 'ren', 'vkj')
+        - full_text: Full text content of the job ad
     """
     url = "https://ignitisgrupe.lt/karjera/darbo-skelbimai"
     headers = {
@@ -23,65 +24,108 @@ def ignitis_scraper() -> List[Dict[str, Optional[str]]]:
     }
     
     try:
+        print("Fetching job list page...")
         response = requests.get(url, headers=headers, timeout=30)
         response.raise_for_status()
         
         soup = BeautifulSoup(response.content, 'html.parser')
-        jobs = []
         
         # Find all job listing links
         job_links = soup.find_all('a', href=lambda x: x and '/darbo-skelbimai/' in x and x.startswith('https://ignitisgrupe.lt/darbo-skelbimai/'))
         
-        for link in job_links:
-            job_data = {}
-            
-            # Extract URL
-            job_data['url'] = link.get('href', '').strip()
-            
-            # Extract text content from the link
-            link_text = link.get_text(separator='|', strip=True)
-            parts = [part.strip() for part in link_text.split('|') if part.strip()]
-            
-            # Parse the parts
-            if len(parts) >= 1:
-                # First part usually contains company tag and title
-                first_part = parts[0]
-                # Extract company tag (first word in lowercase)
-                words = first_part.split()
-                if words:
-                    # Check if first word is a company tag (lowercase, short)
-                    if words[0].islower() and len(words[0]) <= 4:
-                        job_data['company_tag'] = words[0]
-                        job_data['title'] = ' '.join(words[1:])
-                    else:
-                        job_data['company_tag'] = None
-                        job_data['title'] = first_part
-            
-            # Extract location, work type, and salary from remaining parts
-            job_data['location'] = parts[1] if len(parts) > 1 else None
-            job_data['work_type'] = parts[2] if len(parts) > 2 else None
-            
-            # Find salary (usually contains "Atlyginimas" or numbers with €)
-            job_data['salary'] = None
-            for part in parts[3:]:
-                if 'Atlyginimas' in part or '€' in part:
-                    job_data['salary'] = part.replace('Atlyginimas', '').strip()
-                    break
-            
-            # Only add if we have at least a title and URL
-            if job_data.get('title') and job_data.get('url'):
-                jobs.append(job_data)
-        
-        # Remove duplicates based on URL
+        # Remove duplicates and get unique URLs
         seen_urls = set()
-        unique_jobs = []
-        for job in jobs:
-            if job['url'] not in seen_urls:
-                seen_urls.add(job['url'])
-                unique_jobs.append(job)
+        unique_urls = []
+        link_metadata = {}
         
-        print(f"Successfully scraped {len(unique_jobs)} job listings from Ignitis Group")
-        return unique_jobs
+        for link in job_links:
+            job_url = link.get('href', '').strip()
+            if job_url and job_url not in seen_urls:
+                seen_urls.add(job_url)
+                unique_urls.append(job_url)
+                
+                # Store metadata from listing page
+                link_text = link.get_text(separator='|', strip=True)
+                parts = [part.strip() for part in link_text.split('|') if part.strip()]
+                link_metadata[job_url] = parts
+        
+        print(f"Found {len(unique_urls)} unique job listings. Fetching details...")
+        
+        jobs = []
+        for i, job_url in enumerate(unique_urls, 1):
+            try:
+                print(f"  [{i}/{len(unique_urls)}] Scraping: {job_url}")
+                
+                # Fetch individual job page
+                job_response = requests.get(job_url, headers=headers, timeout=30)
+                job_response.raise_for_status()
+                job_soup = BeautifulSoup(job_response.content, 'html.parser')
+                
+                job_data = {'url': job_url}
+                
+                # Get metadata from listing page
+                parts = link_metadata.get(job_url, [])
+                
+                # Parse the parts
+                if len(parts) >= 1:
+                    # First part usually contains company tag and title
+                    first_part = parts[0]
+                    # Extract company tag (first word in lowercase)
+                    words = first_part.split()
+                    if words:
+                        # Check if first word is a company tag (lowercase, short)
+                        if words[0].islower() and len(words[0]) <= 4:
+                            job_data['company_tag'] = words[0]
+                            job_data['title'] = ' '.join(words[1:])
+                        else:
+                            job_data['company_tag'] = None
+                            job_data['title'] = first_part
+                
+                # Extract location, work type, and salary from remaining parts
+                job_data['location'] = parts[1] if len(parts) > 1 else None
+                job_data['work_type'] = parts[2] if len(parts) > 2 else None
+                
+                # Find salary (usually contains "Atlyginimas" or numbers with €)
+                job_data['salary'] = None
+                for part in parts[3:]:
+                    if 'Atlyginimas' in part or '€' in part:
+                        job_data['salary'] = part.replace('Atlyginimas', '').strip()
+                        break
+                
+                # Extract full text from the job page
+                # Remove script and style elements
+                for script_or_style in job_soup(['script', 'style', 'nav', 'footer', 'header']):
+                    script_or_style.decompose()
+                
+                # Get the main content area (adjust selector based on page structure)
+                main_content = job_soup.find('main') or job_soup.find('article') or job_soup.find('div', class_=lambda x: x and ('content' in x.lower() or 'job' in x.lower()))
+                
+                if main_content:
+                    full_text = main_content.get_text(separator='\n', strip=True)
+                else:
+                    # Fallback to body if main content not found
+                    full_text = job_soup.get_text(separator='\n', strip=True)
+                
+                # Clean up the text (remove excessive whitespace)
+                import re
+                full_text = re.sub(r'\n\s*\n', '\n\n', full_text)
+                full_text = re.sub(r' +', ' ', full_text)
+                job_data['full_text'] = full_text.strip()
+                
+                # Only add if we have at least a title and URL
+                if job_data.get('title') and job_data.get('url'):
+                    jobs.append(job_data)
+                
+                # Small delay to avoid overwhelming the server
+                import time
+                time.sleep(0.5)
+                
+            except Exception as e:
+                print(f"    Error scraping {job_url}: {e}")
+                continue
+        
+        print(f"\nSuccessfully scraped {len(jobs)} job listings from Ignitis Group")
+        return jobs
         
     except requests.RequestException as e:
         print(f"Error fetching the webpage: {e}")
@@ -105,6 +149,7 @@ def epsog_scraper() -> List[Dict[str, Optional[str]]]:
         - remote_work: Whether remote work is available
         - department: Department/company
         - description: Job description snippet
+        - full_text: Full text content of the job ad
     """
     url = "https://careers.smartrecruiters.com/EPSOG"
     headers = {
@@ -240,6 +285,25 @@ def epsog_scraper() -> List[Dict[str, Optional[str]]]:
                     job_data['description'] = ' | '.join(descriptions)
                 else:
                     job_data['description'] = None
+                
+                # Extract full text from the job page
+                # Remove script and style elements
+                for script_or_style in job_soup(['script', 'style', 'nav', 'footer', 'header']):
+                    script_or_style.decompose()
+                
+                # Get the main content area
+                main_content = job_soup.find('section', class_=lambda x: x and 'details' in x.lower()) or job_soup.find('div', class_=lambda x: x and 'job' in x.lower()) or job_soup.find('main') or job_soup.find('article')
+                
+                if main_content:
+                    full_text = main_content.get_text(separator='\n', strip=True)
+                else:
+                    # Fallback to body if main content not found
+                    full_text = job_soup.get_text(separator='\n', strip=True)
+                
+                # Clean up the text (remove excessive whitespace)
+                full_text = re.sub(r'\n\s*\n', '\n\n', full_text)
+                full_text = re.sub(r' +', ' ', full_text)
+                job_data['full_text'] = full_text.strip()
                 
                 jobs.append(job_data)
                 
